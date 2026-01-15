@@ -1,186 +1,248 @@
 import os
-import base64
 import json
-from datetime import datetime, timezone, timedelta
+import datetime
+from pathlib import Path
 
 import requests
-from flask import Flask, jsonify, Response
-from flask_cors import CORS
+from flask import Flask, Response
+
+# OpenAI (SDK nuevo)
+from openai import OpenAI
 
 app = Flask(__name__)
-CORS(app)
+app.json.ensure_ascii = False  # por si usas jsonify en algún momento
 
-ASTRO_USER_ID = os.environ.get("ASTRO_USER_ID", "")
-ASTRO_API_KEY = os.environ.get("ASTRO_API_KEY", "")
-HORO_TZ = float(os.environ.get("HORO_TZ", "1"))  # España = 1 (invierno), 2 (verano)
+# ---------------------------
+# Config
+# ---------------------------
+CACHE_DIR = Path("./cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
-ASTRO_ENDPOINT = "https://json.astrologyapi.com/v1/sun_sign_consolidated/daily/{}"
+ASTRO_USER_ID = os.getenv("ASTRO_USER_ID")
+ASTRO_API_KEY = os.getenv("ASTRO_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-SIGNS = [
-    "aries","taurus","gemini","cancer","leo","virgo",
-    "libra","scorpio","sagittarius","capricorn","aquarius","pisces"
+if not ASTRO_USER_ID or not ASTRO_API_KEY:
+    # No rompemos aquí para que Render "live" arranque,
+    # pero el endpoint dará error claro si faltan.
+    pass
+
+if not OPENAI_API_KEY:
+    pass
+
+# Ajusta esto si tu endpoint real de horóscopo externo es distinto
+# (en local ya lo tenías funcionando).
+ASTRO_BASE_URL = "https://astrologyapi.com/api/v1"  # <-- si usabas otro, cámbialo aquí
+
+SIGNOS_EN = [
+    "aries", "taurus", "gemini", "cancer", "leo", "virgo",
+    "libra", "scorpio", "sagittarius", "capricorn", "aquarius", "pisces"
 ]
 
-CACHE_FILE = "cache_horoscope.json"
+SIGNOS_ES = {
+    "aries": "Aries",
+    "taurus": "Tauro",
+    "gemini": "Géminis",
+    "cancer": "Cáncer",
+    "leo": "Leo",
+    "virgo": "Virgo",
+    "libra": "Libra",
+    "scorpio": "Escorpio",
+    "sagittarius": "Sagitario",
+    "capricorn": "Capricornio",
+    "aquarius": "Acuario",
+    "pisces": "Piscis",
+}
 
-def today_key():
-    tz = timezone(timedelta(hours=HORO_TZ))
-    return datetime.now(tz).strftime("%Y-%m-%d")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-def astro_headers():
-    auth_string = f"{ASTRO_USER_ID}:{ASTRO_API_KEY}"
-    auth_encoded = base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
-    return {
-        "Authorization": f"Basic {auth_encoded}",
-        "Content-Type": "application/json",
-        "Accept-Language": "en"
+
+# ---------------------------
+# Helpers
+# ---------------------------
+def _today_key() -> str:
+    # Cache por fecha en horario local del servidor (Render suele ir UTC)
+    # Si quieres España sí o sí, lo mejor es fijar TZ en Render.
+    return datetime.date.today().isoformat()
+
+
+def _cache_path(date_key: str) -> Path:
+    return CACHE_DIR / f"horoscope_{date_key}.json"
+
+
+def _load_cache(date_key: str):
+    p = _cache_path(date_key)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def _save_cache(date_key: str, data: dict):
+    p = _cache_path(date_key)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _json_response(data: dict, status: int = 200) -> Response:
+    return Response(
+        json.dumps(data, ensure_ascii=False),
+        status=status,
+        mimetype="application/json; charset=utf-8"
+    )
+
+
+def _astro_auth_headers():
+    # AstrologyAPI usa Basic Auth con user_id:api_key
+    # Muchas implementaciones usan (user_id, api_key) como auth en requests
+    return (ASTRO_USER_ID, ASTRO_API_KEY)
+
+
+def fetch_12_from_astro() -> dict:
+    """
+    Devuelve un dict:
+    {
+      "aries": {"prediction": "...", "prediction_date": "...", "sun_sign":"aries"},
+      ...
     }
-
-def load_cache():
-    if not os.path.exists(CACHE_FILE):
-        return None
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-def save_cache(data):
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def fetch_one(sign):
-    url = ASTRO_ENDPOINT.format(sign)
-    payload = {"timezone": HORO_TZ}
-    r = requests.post(url, json=payload, headers=astro_headers(), timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    # Respuesta típica: status, sun_sign, prediction_date, prediction
-    if not data.get("status"):
-        raise RuntimeError(str(data))
-    return {
-        "sun_sign": data.get("sun_sign", sign),
-        "prediction_date": data.get("prediction_date", ""),
-        "prediction": data.get("prediction", "")
-    }
-
-def get_today_data(force=False):
-    key = today_key()
-    cached = load_cache()
-    if (not force) and cached and cached.get("date_key") == key:
-        cached["_cached"] = True
-        return cached
-
+    """
     if not ASTRO_USER_ID or not ASTRO_API_KEY:
         raise RuntimeError("Faltan ASTRO_USER_ID / ASTRO_API_KEY en variables de entorno")
 
-    signs_data = {}
-    for s in SIGNS:
-        signs_data[s] = fetch_one(s)
+    results = {}
 
-    result = {
-        "date_key": key,
-        "signs": signs_data,
-        "_cached": False
+    # Endpoint típico de astrologyapi para 'sun_sign_prediction/daily/<sign>'
+    # Si tu endpoint era otro, dime cuál y lo ajusto.
+    for sign in SIGNOS_EN:
+        url = f"{ASTRO_BASE_URL}/sun_sign_prediction/daily/{sign}"
+        r = requests.post(url, auth=_astro_auth_headers())
+        if r.status_code != 200:
+            raise RuntimeError(f"Error Astro API ({sign}): {r.status_code} {r.text[:200]}")
+
+        payload = r.json()
+        # Suele venir con "prediction" y "prediction_date"
+        results[sign] = {
+            "sun_sign": sign,
+            "prediction_date": payload.get("prediction_date") or payload.get("date") or "",
+            "prediction": payload.get("prediction") or "",
+        }
+
+    return results
+
+
+def translate_all_12_with_openai(signs_en_payload: dict) -> dict:
+    """
+    Recibe el dict con 12 signos en inglés y devuelve dict con 12 signos en español.
+    Devuelve:
+    {
+      "Acuario": {"signo":"Acuario","fecha":"...","texto":"..."},
+      ...
     }
-    save_cache(result)
-    return result
+    """
+    if client is None:
+        raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno")
 
-# ---------- API JSON ----------
-@app.get("/api/horoscope/today")
-def api_today():
-    data = get_today_data(force=False)
-    return jsonify(data)
+    # Construimos un JSON compacto con lo que hay que traducir
+    # (solo texto inglés).
+    input_for_model = []
+    for sign_en in SIGNOS_EN:
+        item = signs_en_payload[sign_en]
+        input_for_model.append({
+            "sign_en": sign_en,
+            "sign_es": SIGNOS_ES[sign_en],
+            "prediction_date": item.get("prediction_date", ""),
+            "text_en": item.get("prediction", ""),
+        })
 
-@app.get("/api/horoscope/refresh")
-def api_refresh():
-    data = get_today_data(force=True)
-    return jsonify(data)
+    system = (
+        "Eres traductor profesional al español de España. "
+        "Traduce con naturalidad, sin anglicismos, manteniendo el tono de horóscopo diario. "
+        "No añadas información nueva. No cambies el significado. "
+        "Devuelve SOLO JSON válido."
+    )
 
-# ---------- HTML bonito (para iframe) ----------
-@app.get("/horoscopo")
-def horoscopo_html():
-    data = get_today_data(force=False)
-    date_key = data.get("date_key","")
-    signs = data.get("signs",{})
+    user = (
+        "Traduce los 12 textos al español (España). "
+        "Devuelve un JSON con esta forma EXACTA:\n"
+        "{\n"
+        '  "date_key": "YYYY-MM-DD",\n'
+        '  "signs": {\n'
+        '    "Acuario": {"signo":"Acuario","fecha":"...","texto":"..."}\n'
+        "  }\n"
+        "}\n\n"
+        f"date_key = {_today_key()}\n"
+        "Datos a traducir (JSON):\n"
+        + json.dumps(input_for_model, ensure_ascii=False)
+    )
 
-    cards = []
-    for sign, info in signs.items():
-        text = info.get("prediction", "")
-        # Si en el futuro añades prediction_es, se usará automáticamente:
-        text = info.get("prediction_es", text)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
 
-        cards.append(f"""
-          <div class="card">
-            <div class="title">{sign.capitalize()}</div>
-            <div class="text">{text}</div>
-          </div>
-        """)
+    content = resp.choices[0].message.content.strip()
 
-    html = f"""<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Horóscopo</title>
-<style>
-  body {{
-    margin:0; padding:18px;
-    font-family: Arial, sans-serif;
-    background:#0f0f10;
-    color:#f5e6b8;
-  }}
-  h2 {{
-    margin:0 0 10px 0;
-    text-align:center;
-    color:#f5e6b8;
-    font-weight:800;
-    letter-spacing:.3px;
-  }}
-  .sub {{
-    text-align:center;
-    color:#c9a54a;
-    margin-bottom:16px;
-    font-size:13px;
-    opacity:.95;
-  }}
-  .grid {{
-    display:grid;
-    grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
-    gap:14px;
-  }}
-  .card {{
-    border:1px solid rgba(201,165,74,.35);
-    background:#151518;
-    border-radius:14px;
-    padding:14px;
-  }}
-  .title {{
-    color:#c9a54a;
-    font-size:18px;
-    font-weight:800;
-    margin-bottom:8px;
-    text-transform:capitalize;
-  }}
-  .text {{
-    font-size:14px;
-    line-height:1.55;
-    color:#f5e6b8;
-    white-space:pre-wrap;
-  }}
-</style>
-</head>
-<body>
-  <h2>Horóscopo de hoy</h2>
-  <div class="sub">{date_key} · actualizado automáticamente</div>
-  <div class="grid">
-    {''.join(cards)}
-  </div>
-</body>
-</html>"""
+    # Intentamos parsear JSON tal cual
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # Si el modelo envolvió con ```json ...```, lo limpiamos
+        cleaned = content.replace("```json", "").replace("```", "").strip()
+        data = json.loads(cleaned)
+
+    # Validación mínima
+    if "signs" not in data or not isinstance(data["signs"], dict):
+        raise RuntimeError("OpenAI no devolvió el formato esperado (falta 'signs')")
+
+    return data
+
+
+# ---------------------------
+# Routes
+# ---------------------------
+@app.get("/")
+def home():
+    # mini página para comprobar rápido
+    html = """
+    <html><head><meta charset="utf-8"><title>CoachAstral API</title></head>
+    <body style="font-family:Arial;max-width:800px;margin:40px auto;">
+      <h2>API CoachAstral Horóscopo</h2>
+      <p>Prueba aquí:</p>
+      <ul>
+        <li><a href="/api/horoscope/today">/api/horoscope/today</a></li>
+      </ul>
+    </body></html>
+    """
     return Response(html, mimetype="text/html; charset=utf-8")
 
-# Render usa la variable PORT
+
+@app.get("/api/horoscope/today")
+def api_today():
+    date_key = _today_key()
+
+    cached = _load_cache(date_key)
+    if cached:
+        cached["_cached"] = True
+        return _json_response(cached)
+
+    # 1) pedimos los 12 a la API externa (inglés)
+    signs_en = fetch_12_from_astro()
+
+    # 2) traducimos de una vez con OpenAI y devolvemos SOLO español
+    translated = translate_all_12_with_openai(signs_en)
+
+    # 3) guardamos cache y devolvemos
+    translated["_cached"] = False
+    _save_cache(date_key, translated)
+    return _json_response(translated)
+
+
+# ---------------------------
+# Local run (si lo ejecutas en tu PC)
+# ---------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True)
+
+
