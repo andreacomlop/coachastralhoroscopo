@@ -2,3 +2,4 @@ flask
 flask-cors
 requests
 gunicorn
+openai==1.61.0
