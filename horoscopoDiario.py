@@ -15,22 +15,20 @@ from openai import OpenAI
 # ---------------------------
 TZ_NAME = os.getenv("TZ", "Europe/Madrid").strip()
 
-# AstrologyAPI (Basic Auth)
 ASTRO_USER_ID = os.getenv("ASTRO_USER_ID", "").strip()
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY", "").strip()
-HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional; si está vacío usamos el offset real
+HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional: "1", "2", "5.5"...
 ASTRO_BASE = "https://json.astrologyapi.com/v1"
 
-# OpenAI SOLO traduce
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
+
 SIGNS_ES = [
     "aries", "tauro", "géminis", "cáncer", "leo", "virgo",
-    "libra", "escorpio", "sagitario", "capricornio", "acuario", "piscis"
+    "libra", "escorpio", "sagitario", "capricornio", "acuario", "piscis",
 ]
 
-# ES -> EN (para el endpoint de Astrology)
 SIGNS_EN = {
     "aries": "aries",
     "tauro": "taurus",
@@ -57,28 +55,26 @@ app = Flask(__name__)
 CORS(app)
 
 
+# ---------------------------
+# Helpers
+# ---------------------------
 def today_key_and_label():
     """Devuelve (date_key 'YYYY-MM-DD', label 'DD-MM-YYYY') en TZ."""
     now = datetime.now(ZoneInfo(TZ_NAME))
-    date_key = now.strftime("%Y-%m-%d")
-    label = now.strftime("%d-%m-%Y")
-    return date_key, label
+    return now.strftime("%Y-%m-%d"), now.strftime("%d-%m-%Y")
 
 
 def timezone_offset_hours() -> float:
-    """Offset horario actual respecto a UTC en horas (ej: 1, 2)."""
+    """Offset actual respecto a UTC en horas (ej: 1, 2)."""
     now = datetime.now(ZoneInfo(TZ_NAME))
     offset = now.utcoffset()
-    if not offset:
-        return 0.0
-    return offset.total_seconds() / 3600.0
+    return offset.total_seconds() / 3600 if offset else 0.0
 
 
 def get_tz_for_astrology() -> float:
     """
-    AstrologyAPI suele pedir timezone en horas (float).
-    Si HORO_TZ está definido en Render, lo usamos (ej "1" o "2" o "5.5").
-    Si no, calculamos el offset real de Europe/Madrid.
+    AstrologyAPI acepta timezone como float.
+    Si HORO_TZ está en Render, se usa; si no, calculamos el offset real.
     """
     if HORO_TZ:
         try:
@@ -88,6 +84,9 @@ def get_tz_for_astrology() -> float:
     return timezone_offset_hours()
 
 
+# ---------------------------
+# AstrologyAPI (FUENTE del contenido)
+# ---------------------------
 def astrology_consolidated_daily(sign_en: str, tz_hours: float) -> dict:
     """
     POST https://json.astrologyapi.com/v1/sun_sign_consolidated/daily/<zodiac>
@@ -106,8 +105,38 @@ def astrology_consolidated_daily(sign_en: str, tz_hours: float) -> dict:
     return r.json()
 
 
+def extract_prediction_sections(api_json: dict) -> dict:
+    """
+    Intenta extraer secciones del consolidated.
+    Normalmente viene como:
+      { "prediction": { "personal_life": "...", "profession": "...", ... } }
+    Si no, devolvemos lo que haya sin romper.
+    """
+    pred = api_json.get("prediction")
+
+    if isinstance(pred, dict) and pred:
+        return pred
+
+    if isinstance(pred, str) and pred.strip():
+        return {"general": pred.strip()}
+
+    # fallback: busca en claves habituales
+    for k in ["personal_life", "profession", "health", "luck", "emotion", "travel"]:
+        if isinstance(api_json.get(k), str) and api_json.get(k).strip():
+            # si viene plano, lo empaquetamos
+            return {k: api_json.get(k).strip()}
+
+    return {"raw": json.dumps(api_json, ensure_ascii=False)}
+
+
+# ---------------------------
+# OpenAI (SOLO traducción)
+# ---------------------------
 def translate_es_strict(text: str) -> str:
-    """Traduce fielmente a español. Si no hay OPENAI_API_KEY, devuelve el original."""
+    """
+    Traducción fiel: no añadir, no quitar, no resumir.
+    Si no hay OPENAI_API_KEY, devolvemos el original.
+    """
     if not text:
         return ""
 
@@ -136,42 +165,42 @@ def translate_es_strict(text: str) -> str:
             {"role": "user", "content": prompt},
         ],
     )
+
     return (resp.choices[0].message.content or "").strip()
 
 
-def extract_sections(api_json: dict) -> dict:
+def join_sections_for_prediction(sections_es: dict) -> str:
     """
-    Normaliza la salida típica del endpoint consolidated.
-    Suele venir algo como prediction: { personal_life, profession, health, luck, ...}
-    Si no viene así, lo dejamos en 'raw'.
+    Devuelve un único texto (por si GoodBarber pinta solo una caja).
     """
-    pred = api_json.get("prediction")
-    if isinstance(pred, dict) and pred:
-        return pred
-    # algunos endpoints pueden devolver 'prediction' como string
-    if isinstance(pred, str) and pred.strip():
-        return {"general": pred.strip()}
-    return {"raw": json.dumps(api_json, ensure_ascii=False)}
+    parts = []
+    for k, v in sections_es.items():
+        label = k.replace("_", " ").strip().capitalize()
+        parts.append(f"{label}: {v}")
+    return "\n\n".join(parts).strip()
 
 
-def build_consolidated_today(date_key: str, date_label: str) -> dict,:
+# ---------------------------
+# Construcción consolidada (12 signos)
+# ---------------------------
+def build_consolidated_today(date_key: str, date_label: str) -> dict:
     tz_hours = get_tz_for_astrology()
     signs_out = {}
 
     for sign_es in SIGNS_ES:
         sign_en = SIGNS_EN[sign_es]
+
         api_json = astrology_consolidated_daily(sign_en, tz_hours)
+        sections_en = extract_prediction_sections(api_json)
 
-        sections_en = extract_sections(api_json)
-
-        # traducimos cada sección para que GoodBarber lo tenga limpio
+        # traducimos cada sección (si hay OpenAI)
         sections_es = {k: translate_es_strict(str(v)) for k, v in sections_en.items()}
 
-        # y además generamos un texto "unido" por si tu app solo pinta una caja
-        joined = "\n\n".join([f"{k.replace('_',' ').title()}: {v}" for k, v in sections_es.items()])
+        # texto unido para compatibilidad
+        prediction = join_sections_for_prediction(sections_es)
 
         signs_out[sign_es] = {
-            "prediction": joined,
+            "prediction": prediction,
             "prediction_sections": sections_es,
             "prediction_date": date_label,
             "sun_sign": sign_es,
@@ -184,6 +213,9 @@ def build_consolidated_today(date_key: str, date_label: str) -> dict,:
     }
 
 
+# ---------------------------
+# Routes
+# ---------------------------
 @app.get("/")
 def home():
     return (
@@ -210,4 +242,6 @@ def api_today():
 
 
 if __name__ == "__main__":
+    # Local dev
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
