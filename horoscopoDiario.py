@@ -11,43 +11,26 @@ from openai import OpenAI
 
 
 # ---------------------------
-# Config
+# Config (Render env vars)
 # ---------------------------
-TZ_NAME = os.getenv("TZ", "Europe/Madrid")
+TZ_NAME = os.getenv("TZ", "Europe/Madrid").strip()
 
-# OpenAI SOLO TRADUCE
+# AstrologyAPI (Basic Auth)
+ASTRO_USER_ID = os.getenv("ASTRO_USER_ID", "").strip()
+ASTRO_API_KEY = os.getenv("ASTRO_API_KEY", "").strip()
+HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional; si está vacío usamos el offset real
+ASTRO_BASE = "https://json.astrologyapi.com/v1"
+
+# OpenAI SOLO traduce
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
-# HoroscopeAPI (Astrology genera el contenido)
-HOROSCOPEAPI_KEY = os.getenv("HOROSCOPEAPI_KEY", "").strip()
-HOROSCOPEAPI_URL = os.getenv(
-    "HOROSCOPEAPI_URL",
-    "https://horoscopeapi.com/v1/sun_sign_prediction/daily/zodiac"
-).strip()
-
-# Cómo enviar la API key (elige UNA de estas formas con env vars)
-# - Header: HOROSCOPEAPI_KEY_HEADER = "X-API-Key" (o "Authorization")
-# - Query param: HOROSCOPEAPI_KEY_QUERY = "api_key" (o "key")
-HOROSCOPEAPI_KEY_HEADER = os.getenv("HOROSCOPEAPI_KEY_HEADER", "X-API-Key").strip()
-HOROSCOPEAPI_KEY_QUERY = os.getenv("HOROSCOPEAPI_KEY_QUERY", "").strip()  # si lo usas, pon nombre del parámetro
-
 SIGNS_ES = [
-    "aries",
-    "tauro",
-    "géminis",
-    "cáncer",
-    "leo",
-    "virgo",
-    "libra",
-    "escorpio",
-    "sagitario",
-    "capricornio",
-    "acuario",
-    "piscis",
+    "aries", "tauro", "géminis", "cáncer", "leo", "virgo",
+    "libra", "escorpio", "sagitario", "capricornio", "acuario", "piscis"
 ]
 
-# Mapeo ES -> EN (HoroscopeAPI suele querer EN)
+# ES -> EN (para el endpoint de Astrology)
 SIGNS_EN = {
     "aries": "aries",
     "tauro": "taurus",
@@ -91,48 +74,44 @@ def timezone_offset_hours() -> float:
     return offset.total_seconds() / 3600.0
 
 
-def fetch_horoscope_one_sign_en(sign_en: str, tz_hours: float) -> dict:
+def get_tz_for_astrology() -> float:
     """
-    Llama a HoroscopeAPI y devuelve la respuesta JSON original (EN o el idioma que devuelva).
+    AstrologyAPI suele pedir timezone en horas (float).
+    Si HORO_TZ está definido en Render, lo usamos (ej "1" o "2" o "5.5").
+    Si no, calculamos el offset real de Europe/Madrid.
     """
-    if not HOROSCOPEAPI_KEY:
-        raise RuntimeError("Falta HOROSCOPEAPI_KEY en variables de entorno (Render).")
+    if HORO_TZ:
+        try:
+            return float(HORO_TZ.replace(",", "."))
+        except ValueError:
+            pass
+    return timezone_offset_hours()
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept-Language": "en",
-    }
 
-    # Auth por header (lo más típico)
-    if HOROSCOPEAPI_KEY_HEADER:
-        headers[HOROSCOPEAPI_KEY_HEADER] = HOROSCOPEAPI_KEY
+def astrology_consolidated_daily(sign_en: str, tz_hours: float) -> dict:
+    """
+    POST https://json.astrologyapi.com/v1/sun_sign_consolidated/daily/<zodiac>
+    Auth: Basic (ASTRO_USER_ID, ASTRO_API_KEY)
+    """
+    if not ASTRO_USER_ID or not ASTRO_API_KEY:
+        raise RuntimeError("Faltan ASTRO_USER_ID o ASTRO_API_KEY en Render.")
 
-    payload = {
-        "timezone": tz_hours,
-        "sunSign": sign_en,
-    }
+    url = f"{ASTRO_BASE}/sun_sign_consolidated/daily/{sign_en}"
+    payload = {"timezone": tz_hours}
 
-    params = None
-    # Auth por query param (si tu proveedor lo requiere)
-    if HOROSCOPEAPI_KEY_QUERY:
-        params = {HOROSCOPEAPI_KEY_QUERY: HOROSCOPEAPI_KEY}
-
-    r = requests.post(HOROSCOPEAPI_URL, headers=headers, params=params, json=payload, timeout=25)
+    r = requests.post(url, auth=(ASTRO_USER_ID, ASTRO_API_KEY), json=payload, timeout=25)
     if r.status_code >= 400:
-        raise RuntimeError(f"HoroscopeAPI error {r.status_code}: {r.text[:300]}")
+        raise RuntimeError(f"AstrologyAPI error {r.status_code}: {r.text[:300]}")
 
-    try:
-        return r.json()
-    except Exception:
-        raise RuntimeError(f"HoroscopeAPI no devolvió JSON válido: {r.text[:300]}")
+    return r.json()
 
 
-def translate_to_spanish_strict(text: str) -> str:
-    """
-    Traducción estricta: NO añadir, NO quitar, NO reescribir, NO tono coach.
-    """
+def translate_es_strict(text: str) -> str:
+    """Traduce fielmente a español. Si no hay OPENAI_API_KEY, devuelve el original."""
+    if not text:
+        return ""
+
     if not OPENAI_API_KEY:
-        # Si no hay OpenAI, devolvemos el texto tal cual (EN)
         return text
 
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -140,11 +119,12 @@ def translate_to_spanish_strict(text: str) -> str:
     prompt = (
         "Traduce al español de España el siguiente texto.\n"
         "Reglas estrictas:\n"
-        "- Traducción fiel y literal.\n"
+        "- Traducción fiel.\n"
         "- No añadas información.\n"
         "- No elimines información.\n"
-        "- No cambies el tono ni resumas.\n"
-        "- No introduzcas astrología extra ni consejos nuevos.\n\n"
+        "- No resumas.\n"
+        "- No cambies el tono.\n"
+        "- Devuelve SOLO la traducción.\n\n"
         f"TEXTO:\n{text}"
     )
 
@@ -152,57 +132,49 @@ def translate_to_spanish_strict(text: str) -> str:
         model=OPENAI_MODEL,
         temperature=0,
         messages=[
-            {"role": "system", "content": "Eres un traductor profesional. Devuelves solo la traducción, sin texto extra."},
+            {"role": "system", "content": "Eres un traductor profesional. Respondes solo con la traducción."},
             {"role": "user", "content": prompt},
         ],
     )
-
     return (resp.choices[0].message.content or "").strip()
 
 
-def extract_prediction_text(api_json: dict) -> str:
+def extract_sections(api_json: dict) -> dict:
     """
-    Intenta encontrar el campo de predicción dentro del JSON devuelto por HoroscopeAPI.
-    Como no tenemos el esquema exacto aquí, lo hacemos robusto.
-    Ajusta si ves el nombre exacto.
+    Normaliza la salida típica del endpoint consolidated.
+    Suele venir algo como prediction: { personal_life, profession, health, luck, ...}
+    Si no viene así, lo dejamos en 'raw'.
     """
-    # Intentos comunes:
-    for key in ["prediction", "horoscope", "text", "description", "daily_prediction"]:
-        val = api_json.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-
-    # Si viene anidado:
-    for container_key in ["data", "result", "response"]:
-        cont = api_json.get(container_key)
-        if isinstance(cont, dict):
-            for key in ["prediction", "horoscope", "text", "description", "daily_prediction"]:
-                val = cont.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-
-    # Último recurso: stringify (para que no falle silencioso)
-    return json.dumps(api_json, ensure_ascii=False)
+    pred = api_json.get("prediction")
+    if isinstance(pred, dict) and pred:
+        return pred
+    # algunos endpoints pueden devolver 'prediction' como string
+    if isinstance(pred, str) and pred.strip():
+        return {"general": pred.strip()}
+    return {"raw": json.dumps(api_json, ensure_ascii=False)}
 
 
-def build_consolidated_today(date_key: str, date_label: str) -> dict:
-    tz_hours = timezone_offset_hours()
-
+def build_consolidated_today(date_key: str, date_label: str) -> dict,:
+    tz_hours = get_tz_for_astrology()
     signs_out = {}
 
     for sign_es in SIGNS_ES:
         sign_en = SIGNS_EN[sign_es]
+        api_json = astrology_consolidated_daily(sign_en, tz_hours)
 
-        raw = fetch_horoscope_one_sign_en(sign_en, tz_hours)
-        prediction_en = extract_prediction_text(raw)
+        sections_en = extract_sections(api_json)
 
-        prediction_es = translate_to_spanish_strict(prediction_en)
+        # traducimos cada sección para que GoodBarber lo tenga limpio
+        sections_es = {k: translate_es_strict(str(v)) for k, v in sections_en.items()}
+
+        # y además generamos un texto "unido" por si tu app solo pinta una caja
+        joined = "\n\n".join([f"{k.replace('_',' ').title()}: {v}" for k, v in sections_es.items()])
 
         signs_out[sign_es] = {
-            "prediction": prediction_es,
+            "prediction": joined,
+            "prediction_sections": sections_es,
             "prediction_date": date_label,
             "sun_sign": sign_es,
-            "_source_sign_en": sign_en,  # útil para debug; si no lo quieres, lo quitamos
         }
 
     return {
@@ -239,4 +211,3 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
-
