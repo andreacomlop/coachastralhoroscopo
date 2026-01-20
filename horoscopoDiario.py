@@ -2,6 +2,7 @@ import os
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request
@@ -17,12 +18,11 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid").strip()
 
 ASTRO_USER_ID = os.getenv("ASTRO_USER_ID", "").strip()
 ASTRO_API_KEY = os.getenv("ASTRO_API_KEY", "").strip()
-HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional: "1", "2", "5.5"...
+HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional
 ASTRO_BASE = "https://json.astrologyapi.com/v1"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
-
 
 SIGNS_ES = [
     "aries", "tauro", "géminis", "cáncer", "leo", "virgo",
@@ -44,13 +44,8 @@ SIGNS_EN = {
     "piscis": "pisces",
 }
 
-# Cache en memoria (por día)
 CACHE = {}  # { "YYYY-MM-DD": {...} }
 
-
-# ---------------------------
-# App
-# ---------------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -59,23 +54,17 @@ CORS(app)
 # Helpers
 # ---------------------------
 def today_key_and_label():
-    """Devuelve (date_key 'YYYY-MM-DD', label 'DD-MM-YYYY') en TZ."""
     now = datetime.now(ZoneInfo(TZ_NAME))
     return now.strftime("%Y-%m-%d"), now.strftime("%d-%m-%Y")
 
 
 def timezone_offset_hours() -> float:
-    """Offset actual respecto a UTC en horas (ej: 1, 2)."""
     now = datetime.now(ZoneInfo(TZ_NAME))
     offset = now.utcoffset()
     return offset.total_seconds() / 3600 if offset else 0.0
 
 
 def get_tz_for_astrology() -> float:
-    """
-    AstrologyAPI acepta timezone como float.
-    Si HORO_TZ está en Render, se usa; si no, calculamos el offset real.
-    """
     if HORO_TZ:
         try:
             return float(HORO_TZ.replace(",", "."))
@@ -85,20 +74,16 @@ def get_tz_for_astrology() -> float:
 
 
 # ---------------------------
-# AstrologyAPI (FUENTE del contenido)
+# AstrologyAPI
 # ---------------------------
 def astrology_consolidated_daily(sign_en: str, tz_hours: float) -> dict:
-    """
-    POST https://json.astrologyapi.com/v1/sun_sign_consolidated/daily/<zodiac>
-    Auth: Basic (ASTRO_USER_ID, ASTRO_API_KEY)
-    """
     if not ASTRO_USER_ID or not ASTRO_API_KEY:
         raise RuntimeError("Faltan ASTRO_USER_ID o ASTRO_API_KEY en Render.")
 
     url = f"{ASTRO_BASE}/sun_sign_consolidated/daily/{sign_en}"
     payload = {"timezone": tz_hours}
 
-    r = requests.post(url, auth=(ASTRO_USER_ID, ASTRO_API_KEY), json=payload, timeout=25)
+    r = requests.post(url, auth=(ASTRO_USER_ID, ASTRO_API_KEY), json=payload, timeout=20)
     if r.status_code >= 400:
         raise RuntimeError(f"AstrologyAPI error {r.status_code}: {r.text[:300]}")
 
@@ -106,40 +91,28 @@ def astrology_consolidated_daily(sign_en: str, tz_hours: float) -> dict:
 
 
 def extract_prediction_sections(api_json: dict) -> dict:
-    """
-    Intenta extraer secciones del consolidated.
-    Normalmente viene como:
-      { "prediction": { "personal_life": "...", "profession": "...", ... } }
-    Si no, devolvemos lo que haya sin romper.
-    """
     pred = api_json.get("prediction")
-
     if isinstance(pred, dict) and pred:
         return pred
-
     if isinstance(pred, str) and pred.strip():
         return {"general": pred.strip()}
-
-    # fallback: busca en claves habituales
-    for k in ["personal_life", "profession", "health", "luck", "emotion", "travel"]:
-        if isinstance(api_json.get(k), str) and api_json.get(k).strip():
-            # si viene plano, lo empaquetamos
-            return {k: api_json.get(k).strip()}
-
     return {"raw": json.dumps(api_json, ensure_ascii=False)}
 
 
+def join_sections(sections: dict) -> str:
+    parts = []
+    for k, v in sections.items():
+        label = k.replace("_", " ").strip().capitalize()
+        parts.append(f"{label}: {str(v).strip()}")
+    return "\n\n".join(parts).strip()
+
+
 # ---------------------------
-# OpenAI (SOLO traducción)
+# OpenAI translate (solo 1 vez por signo)
 # ---------------------------
 def translate_es_strict(text: str) -> str:
-    """
-    Traducción fiel: no añadir, no quitar, no resumir.
-    Si no hay OPENAI_API_KEY, devolvemos el original.
-    """
     if not text:
         return ""
-
     if not OPENAI_API_KEY:
         return text
 
@@ -165,46 +138,39 @@ def translate_es_strict(text: str) -> str:
             {"role": "user", "content": prompt},
         ],
     )
-
     return (resp.choices[0].message.content or "").strip()
 
 
-def join_sections_for_prediction(sections_es: dict) -> str:
-    """
-    Devuelve un único texto (por si GoodBarber pinta solo una caja).
-    """
-    parts = []
-    for k, v in sections_es.items():
-        label = k.replace("_", " ").strip().capitalize()
-        parts.append(f"{label}: {v}")
-    return "\n\n".join(parts).strip()
+# ---------------------------
+# Build consolidated (rápido)
+# ---------------------------
+def build_one_sign(sign_es: str, tz_hours: float, date_label: str) -> tuple[str, dict]:
+    sign_en = SIGNS_EN[sign_es]
+
+    api_json = astrology_consolidated_daily(sign_en, tz_hours)
+    sections_en = extract_prediction_sections(api_json)
+
+    text_en = join_sections(sections_en)
+    text_es = translate_es_strict(text_en)
+
+    return sign_es, {
+        "prediction": text_es,
+        "prediction_date": date_label,
+        "sun_sign": sign_es,
+        # si luego quieres, podemos reconstruir secciones en ES, pero esto ya va rápido y limpio
+    }
 
 
-# ---------------------------
-# Construcción consolidada (12 signos)
-# ---------------------------
 def build_consolidated_today(date_key: str, date_label: str) -> dict:
     tz_hours = get_tz_for_astrology()
     signs_out = {}
 
-    for sign_es in SIGNS_ES:
-        sign_en = SIGNS_EN[sign_es]
-
-        api_json = astrology_consolidated_daily(sign_en, tz_hours)
-        sections_en = extract_prediction_sections(api_json)
-
-        # traducimos cada sección (si hay OpenAI)
-        sections_es = {k: translate_es_strict(str(v)) for k, v in sections_en.items()}
-
-        # texto unido para compatibilidad
-        prediction = join_sections_for_prediction(sections_es)
-
-        signs_out[sign_es] = {
-            "prediction": prediction,
-            "prediction_sections": sections_es,
-            "prediction_date": date_label,
-            "sun_sign": sign_es,
-        }
+    # 12 signos en paralelo (reduce muchísimo el tiempo total)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(build_one_sign, s, tz_hours, date_label) for s in SIGNS_ES]
+        for f in as_completed(futures):
+            sign_es, data = f.result()
+            signs_out[sign_es] = data
 
     return {
         "_cached": False,
@@ -242,6 +208,5 @@ def api_today():
 
 
 if __name__ == "__main__":
-    # Local dev
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
 
