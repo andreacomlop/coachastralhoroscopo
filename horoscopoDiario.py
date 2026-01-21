@@ -101,16 +101,15 @@ def extract_prediction_sections(api_json: dict) -> dict:
 
 def join_sections(sections: dict) -> str:
     parts = []
-    for k, v in sections.items():
-        label = k.replace("_", " ").strip().capitalize()
-        parts.append(f"{label}: {str(v).strip()}")
+    for _, v in sections.items():
+        parts.append(str(v).strip())
     return "\n\n".join(parts).strip()
 
 
 # ---------------------------
-# OpenAI translate (solo 1 vez por signo)
+# OpenAI – adaptación editorial (NO literal)
 # ---------------------------
-def translate_es_editorial(text: str, min_chars: int = 900, max_chars: int = 1300) -> str:
+def translate_es_strict(text: str) -> str:
     if not text:
         return ""
     if not OPENAI_API_KEY:
@@ -119,31 +118,32 @@ def translate_es_editorial(text: str, min_chars: int = 900, max_chars: int = 130
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = (
-        "Reescribe el siguiente horóscopo diario en español de España con estilo editorial.\n\n"
+        "Reescribe el siguiente texto en español de España.\n\n"
         "Objetivo:\n"
-        "- Texto natural, fluido y agradable de leer.\n"
-        "- Mantener el significado y las ideas clave del original.\n"
-        "- Quitar repeticiones y mejorar ritmo.\n"
-        "- Dejar sensación de profundidad (sin prometer nada ni mencionar pagos).\n\n"
-        "Reglas estrictas:\n"
-        "- No inventes información nueva.\n"
-        "- No elimines ideas importantes.\n"
-        "- No uses etiquetas o títulos tipo 'General', 'Trabajo', 'Viajes'.\n"
-        "- Evita astrología técnica explícita (no menciones aspectos/planetas de forma técnica).\n"
-        f"- Longitud final entre {min_chars} y {max_chars} caracteres (aprox.).\n"
-        "- Devuelve SOLO el texto final.\n\n"
-        f"TEXTO ORIGINAL:\n{text}"
+        "- Que suene cercano, elegante y fácil de leer.\n"
+        "- Que invite a seguir leyendo y deje sensación de que hay más profundidad.\n\n"
+        "Reglas importantes:\n"
+        "- NO inventes información nueva.\n"
+        "- NO menciones astrología técnica.\n"
+        "- NO uses encabezados como 'General', 'Trabajo', etc.\n"
+        "- NO traduzcas de forma literal.\n"
+        "- Integra todo en un solo texto fluido.\n"
+        "- Extensión media (aprox. 90–140 palabras).\n"
+        "- Tono reflexivo, inspirador y práctico.\n"
+        "- Habla en segunda persona.\n"
+        "- No menciones servicios premium ni llamadas a la acción.\n\n"
+        f"TEXTO BASE:\n{text}"
     )
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        temperature=0.6,
+        temperature=0.7,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "Eres un redactor profesional de horóscopos diarios. "
-                    "Escribes en español de España, con estilo cuidado, claro y atractivo."
+                    "Eres un redactor editorial experto en horóscopos diarios. "
+                    "Transformas textos técnicos en lecturas atractivas y naturales."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -153,9 +153,8 @@ def translate_es_editorial(text: str, min_chars: int = 900, max_chars: int = 130
     return (resp.choices[0].message.content or "").strip()
 
 
-
 # ---------------------------
-# Build consolidated (rápido)
+# Build consolidated
 # ---------------------------
 def build_one_sign(sign_es: str, tz_hours: float, date_label: str) -> tuple[str, dict]:
     sign_en = SIGNS_EN[sign_es]
@@ -170,7 +169,6 @@ def build_one_sign(sign_es: str, tz_hours: float, date_label: str) -> tuple[str,
         "prediction": text_es,
         "prediction_date": date_label,
         "sun_sign": sign_es,
-        # si luego quieres, podemos reconstruir secciones en ES, pero esto ya va rápido y limpio
     }
 
 
@@ -178,7 +176,6 @@ def build_consolidated_today(date_key: str, date_label: str) -> dict:
     tz_hours = get_tz_for_astrology()
     signs_out = {}
 
-    # 12 signos en paralelo (reduce muchísimo el tiempo total)
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(build_one_sign, s, tz_hours, date_label) for s in SIGNS_ES]
         for f in as_completed(futures):
@@ -215,11 +212,28 @@ def api_today():
         cached["_cached"] = True
         return jsonify(cached)
 
-    result = build_consolidated_today(date_key, date_label)
-    CACHE[date_key] = result
-    return jsonify(result)
+    try:
+        result = build_consolidated_today(date_key, date_label)
+        CACHE[date_key] = result
+        return jsonify(result)
+
+    except RuntimeError as e:
+        msg = str(e)
+        if "TRIAL_REQUEST_LIMIT_EXCEEDED" in msg:
+            return jsonify({
+                "_cached": False,
+                "date_key": date_key,
+                "error": "ASTRO_TRIAL_LIMIT",
+                "message": "Hoy no se ha podido generar el horóscopo completo. Vuelve mañana ✨",
+            }), 429
+
+        return jsonify({
+            "_cached": False,
+            "date_key": date_key,
+            "error": "SERVER_ERROR",
+            "message": msg[:300],
+        }), 500
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
-
