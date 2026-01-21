@@ -110,7 +110,7 @@ def join_sections(sections: dict) -> str:
 # ---------------------------
 # OpenAI translate (solo 1 vez por signo)
 # ---------------------------
-def translate_es_strict(text: str) -> str:
+def translate_es_editorial(text: str, min_chars: int = 900, max_chars: int = 1300) -> str:
     if not text:
         return ""
     if not OPENAI_API_KEY:
@@ -119,26 +119,39 @@ def translate_es_strict(text: str) -> str:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = (
-        "Traduce al español de España el siguiente texto.\n"
+        "Reescribe el siguiente horóscopo diario en español de España con estilo editorial.\n\n"
+        "Objetivo:\n"
+        "- Texto natural, fluido y agradable de leer.\n"
+        "- Mantener el significado y las ideas clave del original.\n"
+        "- Quitar repeticiones y mejorar ritmo.\n"
+        "- Dejar sensación de profundidad (sin prometer nada ni mencionar pagos).\n\n"
         "Reglas estrictas:\n"
-        "- Traducción fiel.\n"
-        "- No añadas información.\n"
-        "- No elimines información.\n"
-        "- No resumas.\n"
-        "- No cambies el tono.\n"
-        "- Devuelve SOLO la traducción.\n\n"
-        f"TEXTO:\n{text}"
+        "- No inventes información nueva.\n"
+        "- No elimines ideas importantes.\n"
+        "- No uses etiquetas o títulos tipo 'General', 'Trabajo', 'Viajes'.\n"
+        "- Evita astrología técnica explícita (no menciones aspectos/planetas de forma técnica).\n"
+        f"- Longitud final entre {min_chars} y {max_chars} caracteres (aprox.).\n"
+        "- Devuelve SOLO el texto final.\n\n"
+        f"TEXTO ORIGINAL:\n{text}"
     )
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        temperature=0,
+        temperature=0.6,
         messages=[
-            {"role": "system", "content": "Eres un traductor profesional. Respondes solo con la traducción."},
+            {
+                "role": "system",
+                "content": (
+                    "Eres un redactor profesional de horóscopos diarios. "
+                    "Escribes en español de España, con estilo cuidado, claro y atractivo."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
     )
+
     return (resp.choices[0].message.content or "").strip()
+
 
 
 # ---------------------------
@@ -209,4 +222,5 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
 
