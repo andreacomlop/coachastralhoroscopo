@@ -108,43 +108,37 @@ def join_sections(sections: dict) -> str:
 
 
 # ---------------------------
-# OpenAI translate (solo 1 vez por signo) 
-# --------------------------- 
+# OpenAI translate (solo 1 vez por signo)
+# ---------------------------
 def translate_es_strict(text: str) -> str:
- if not text:
- return ""
- if not OPENAI_API_KEY:
- return text client = OpenAI(api_key=OPENAI_API_KEY)
+    if not text:
+        return ""
+    if not OPENAI_API_KEY:
+        return text
 
- prompt = (
- "Traduce al español de España el siguiente texto.\n"
- "Reglas estrictas:\n"
- "- Traducción fiel.\n"
- "- No añadas información.\n"
- "- No elimines información.\n"
- "- No resumas.\n"
- "- No cambies el tono.\n"
- "- Devuelve SOLO la traducción.\n\n"
- f"TEXTO:\n{text}"
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = (
+        "Traduce al español de España el siguiente texto.\n"
+        "Reglas estrictas:\n"
+        "- Traducción fiel.\n"
+        "- No añadas información.\n"
+        "- No elimines información.\n"
+        "- No resumas.\n"
+        "- No cambies el tono.\n"
+        "- Devuelve SOLO la traducción.\n\n"
+        f"TEXTO:\n{text}"
     )
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        temperature=0.6,
+        temperature=0,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres un redactor profesional de horóscopos diarios. "
-                    "Escribes en español de España, con estilo cuidado, claro y atractivo."
-                ),
-            },
+            {"role": "system", "content": "Eres un traductor profesional. Respondes solo con la traducción."},
             {"role": "user", "content": prompt},
         ],
     )
-
     return (resp.choices[0].message.content or "").strip()
-
 
 
 # ---------------------------
@@ -215,6 +209,3 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
-
-
-
