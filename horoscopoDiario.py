@@ -136,7 +136,6 @@ def translate_es_strict(text: str) -> str:
         "- Escribe en español de España.\n"
         "- Usa segunda persona.\n"
         "- Tono cercano, adulto e inteligente.\n"
-        "- No menciones astrología técnica ni términos astrológicos.\n"
         "- No menciones servicios premium ni llamadas a la acción.\n"
         "- No uses encabezados tipo 'General', 'Trabajo', 'Salud'.\n\n"
 
@@ -152,8 +151,8 @@ def translate_es_strict(text: str) -> str:
 
         "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
         "- Una sola frase.\n"
-        "- Directa, honesta e irónica. Muy compartible.\n"
-        "- Debe encajar con el mensaje del horóscopo (interpretar sin inventar).\n\n"
+        "- Directa, honesta e irónica. Muy compartible, que de la risa al compartir, que se haga viral si se comparte.\n"
+        "- Debe encajar con el mensaje base del horóscopo.\n\n"
 
         "FORMATO DE SALIDA (OBLIGATORIO):\n"
         "Consejo de tu coach:\n"
@@ -272,3 +271,4 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
