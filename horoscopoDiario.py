@@ -139,11 +139,11 @@ def translate_es_strict(text: str) -> str:
     "- Debe sonar a alguien que te conoce y te orienta, no a autoayuda vacía.\n\n"
 
     "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
-    "- Una sola frase.\n"
-    "- Directa, honesta y ligeramente irónica.\n"
-    "- Que haga pensar y sonreír a la vez.\n"
-    "- Muy compartible (efecto viral), pero sin ser agresiva ni juzgar.\n"
-    "- Debe encajar con el mensaje del horóscopo.\n\n"
+    "- Una o dos frases.\n"
+    "- Directa, honesta y ligeramente irónica. Que te queden ganas de compartirla en redes.\n"
+    "- Que haga pensar y sonreír a la vez. E incluso puede hacerte emcionar. \n"
+    "- Muy compartible (efecto viral), pero sin juzgar.\n"
+    "- Debe encajar con el mensaje del horóscopo (debe extraerse del contexto del horóscopo, no inventar, solo interpretar en esta verdad incñomoda, puedes añadir algo de tu cosecha, pero que vaya alineado con el mensaje del horóscopo de dicho signo.\n\n"
 
     "FORMATO DE SALIDA (OBLIGATORIO):\n"
     "Consejo de tu coach:\n"
@@ -255,4 +255,5 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
 
