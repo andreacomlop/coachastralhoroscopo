@@ -213,7 +213,7 @@ def api_today():
         return jsonify(cached)
 
     try:
-        result = build_consolidated_today(date_key, date_label)
+   result = build_daily_horoscope_today(date_key, date_label)
         CACHE[date_key] = result
         return jsonify(result)
 
@@ -237,3 +237,175 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
+# ------------------------------------------------------
+# Nuevas funciones y rutas añadidas para horóscopo diario y consejo/verdad
+# ------------------------------------------------------
+
+def astrology_daily_prediction(sign_en: str, tz_hours: float) -> dict:
+    """
+    Llama al endpoint sun_sign_prediction/daily/{sign_en} de AstrologyAPI.
+    Devuelve el JSON con las distintas categorías de predicción.
+    """
+    if not ASTRO_USER_ID or not ASTRO_API_KEY:
+        raise RuntimeError("Faltan ASTRO_USER_ID o ASTRO_API_KEY en Render.")
+    url = f"{ASTRO_BASE}/sun_sign_prediction/daily/{sign_en}"
+    payload = {"timezone": tz_hours}
+    r = requests.post(url, auth=(ASTRO_USER_ID, ASTRO_API_KEY), json=payload, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"AstrologyAPI error {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+def join_daily_categories(api_json: dict) -> str:
+    """
+    Une las categorías devueltas por sun_sign_prediction/daily en un único texto.
+    Se concatenan las claves en un orden fijo para componer un resumen legible.
+    """
+    order = ["personal_life", "profession", "health", "emotions", "travel", "luck"]
+    parts = []
+    for key in order:
+        if key in api_json and api_json[key].strip():
+            parts.append(api_json[key].strip())
+    return "\n\n".join(parts).strip()
+
+def extract_advice_and_truth(prediction: str) -> tuple[str, str]:
+    """
+    Divide el texto de predicción general en oraciones y toma las dos primeras.
+    La primera oración se usa como 'Consejo del día' y la segunda como 'Verdad incómoda'.
+    Si solo hay una oración, se usa para ambos campos.
+    """
+    import re
+    sentences = re.split(r"\.\s+", prediction.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if not sentences:
+        return "", ""
+    if len(sentences) == 1:
+        return sentences[0], sentences[0]
+    return sentences[0], sentences[1]
+
+def build_one_sign_daily(sign_es: str, tz_hours: float, date_label: str) -> tuple[str, dict]:
+    """
+    Construye la predicción diaria para un signo llamando a astrology_daily_prediction,
+    combinando las categorías y traduciendo al español.
+    Devuelve una tupla con el nombre del signo en español y los datos asociados.
+    """
+    sign_en = SIGNS_EN[sign_es]
+    api_json = astrology_daily_prediction(sign_en, tz_hours)
+    text_en = join_daily_categories(api_json)
+    text_es = translate_es_strict(text_en)
+    return sign_es, {
+        "prediction": text_es,
+        "prediction_date": date_label,
+        "sun_sign": sign_es,
+    }
+
+def build_daily_horoscope_today(date_key: str, date_label: str) -> dict:
+    """
+    Construye el horóscopo diario para todos los signos utilizando
+    sun_sign_prediction/daily y traduce el texto al español.
+    """
+    tz_hours = get_tz_for_astrology()
+    signs_out = {}
+    from concurrent.futures import as_completed  # ensure as_completed is available
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(build_one_sign_daily, s, tz_hours, date_label) for s in SIGNS_ES]
+        for f in as_completed(futures):
+            sign_es, data = f.result()
+            signs_out[sign_es] = data
+    return {
+        "_cached": False,
+        "date_key": date_key,
+        "signs": signs_out,
+    }
+
+def build_one_sign_advice_truth(sign_es: str, tz_hours: float, date_label: str) -> tuple[str, dict]:
+    """
+    Para un signo dado llama al endpoint sign_consolidated/daily, extrae el texto
+    general, lo trocea en oraciones y toma las dos primeras como consejo y verdad.
+    Traduce ambos al español.
+    """
+    sign_en = SIGNS_EN[sign_es]
+    api_json = astrology_consolidated_daily(sign_en, tz_hours)
+    sections_en = extract_prediction_sections(api_json)
+    text_en = join_sections(sections_en)
+    advice_en, truth_en = extract_advice_and_truth(text_en)
+    consejo_es = translate_es_strict(advice_en)
+    verdad_es = translate_es_strict(truth_en)
+    return sign_es, {
+        "consejo": consejo_es,
+        "verdad": verdad_es,
+        "prediction_date": date_label,
+        "sun_sign": sign_es,
+    }
+
+def build_advice_truth_today(date_key: str, date_label: str) -> dict:
+    """
+    Construye la sección de consejo y verdad incómoda para todos los signos.
+    Utiliza el endpoint consolidado existente, extrae las dos primeras frases
+    y las traduce al español.
+    """
+    tz_hours = get_tz_for_astrology()
+    signs_out = {}
+    from concurrent.futures import as_completed
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(build_one_sign_advice_truth, s, tz_hours, date_label) for s in SIGNS_ES]
+        for f in as_completed(futures):
+            sign_es, data = f.result()
+            signs_out[sign_es] = data
+    return {
+        "_cached": False,
+        "date_key": date_key,
+        "signs": signs_out,
+    }
+
+@app.get("/api/horoscope/daily")
+def api_daily_horoscope():
+    """
+    Devuelve el horóscopo diario basado en sun_sign_prediction/daily.
+    Reutiliza el sistema de caché diario (clave: 'daily:{date_key}').
+    """
+    force = request.args.get("force", "0").strip() == "1"
+    date_key, date_label = today_key_and_label()
+    cache_key = f"daily:{date_key}"
+    if (not force) and (cache_key in CACHE):
+        cached = dict(CACHE[cache_key])
+        cached["_cached"] = True
+        return jsonify(cached)
+    try:
+        result = build_daily_horoscope_today(date_key, date_label)
+        CACHE[cache_key] = result
+        return jsonify(result)
+    except RuntimeError as e:
+        msg = str(e)
+        return jsonify({
+            "_cached": False,
+            "date_key": date_key,
+            "error": "API_ERROR",
+            "message": msg,
+        }), 500
+
+@app.get("/api/horoscope/advice")
+def api_advice_truth():
+    """
+    Devuelve el consejo y la verdad incómoda del día para todos los signos.
+    Usa el endpoint consolidado y aplica la misma caché diaria (clave: 'advice:{date_key}').
+    """
+    force = request.args.get("force", "0").strip() == "1"
+    date_key, date_label = today_key_and_label()
+    cache_key = f"advice:{date_key}"
+    if (not force) and (cache_key in CACHE):
+        cached = dict(CACHE[cache_key])
+        cached["_cached"] = True
+        return jsonify(cached)
+    try:
+        result = build_advice_truth_today(date_key, date_label)
+        CACHE[cache_key] = result
+        return jsonify(result)
+    except RuntimeError as e:
+        msg = str(e)
+        return jsonify({
+            "_cached": False,
+            "date_key": date_key,
+            "error": "API_ERROR",
+            "message": msg,
+        }), 500
