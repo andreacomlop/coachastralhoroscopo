@@ -110,47 +110,49 @@ def join_sections(sections: dict) -> str:
 # OpenAI – adaptación editorial (NO literal)
 # ---------------------------
 def translate_es_strict(text: str) -> str:
-    if not text:
-        return ""
+    # 1) Si no hay texto, devolvemos fallback limpio (evita respuestas raras)
+    if not text or len(text.strip()) < 20:
+        return (
+            "Consejo de tu coach:\n"
+            "Hoy te conviene simplificar: elige una sola prioridad y hazla bien, sin dispersarte.\n\n"
+            "Verdad incómoda del día:\n"
+            "No es falta de tiempo: es falta de decisión."
+        )
+
+    # 2) Si no hay OpenAI key, devolvemos el texto tal cual (como ya hacías)
     if not OPENAI_API_KEY:
         return text
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = (
-    "A partir del texto de horóscopo que te doy abajo, genera DOS BLOQUES NUEVOS.\n\n"
-
-    "CONTEXTO:\n"
-    "El texto es un horóscopo diario por signo. No debes añadir información nueva, "
-    "solo interpretar y extraer lo que ya está implícito en él.\n\n"
-
-    "REGLAS GENERALES:\n"
-    "- Escribe en español de España.\n"
-    "- No inventes hechos, situaciones ni predicciones nuevas.\n"
-    "- No menciones astrología técnica ni términos astrológicos.\n"
-    "- No menciones servicios premium ni llamadas a la acción.\n"
-    "- Usa segunda persona.\n"
-    "- Tono cercano, adulto e inteligente.\n\n"
-
-    "BLOQUE 1 · CONSEJO DE TU COACH:\n"
-    "- Un único párrafo corto (30-45 palabras).\n"
-    "- Enfoque práctico y realista.\n"
-    "- Aterriza el mensaje del horóscopo en comportamiento diario.\n"
-    "- Debe sonar a alguien que te conoce y te orienta, no a autoayuda vacía. Pon consejos tangibles. Que te hagan reflexionar y actuar. \n\n"
-
-    "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
-    "- Una sola frase.\n"
-    "- Directa, honesta e irónica. Que te queden ganas de compartirla en redes.\n"
-    "- Que haga pensar y sonreír a la vez. E incluso puede hacerte emcionar. \n"
-    "- Muy compartible (efecto viral), pero sin juzgar.\n"
-    "- Debe encajar con el mensaje del horóscopo (debe extraerse del contexto del horóscopo, no inventar, solo interpretar en esta verdad incñomoda, puedes añadir algo de tu cosecha, pero que vaya alineado con el mensaje del horóscopo de dicho signo).\n\n"
-
-    "FORMATO DE SALIDA (OBLIGATORIO):\n"
-    "Consejo de tu coach:\n"
-    "<texto>\n\n"
-    "Verdad incómoda del día:\n"
-    "<frase>\n\n"
-
+        "A partir del texto de horóscopo que te doy abajo, genera DOS BLOQUES NUEVOS.\n\n"
+        "CONTEXTO:\n"
+        "El texto es un horóscopo diario por signo. No debes añadir información nueva, "
+        "solo interpretar y extraer lo que ya está implícito en él.\n\n"
+        "REGLAS GENERALES:\n"
+        "- Escribe en español de España.\n"
+        "- No inventes hechos, situaciones ni predicciones nuevas.\n"
+        "- No menciones astrología técnica ni términos astrológicos.\n"
+        "- No menciones servicios premium ni llamadas a la acción.\n"
+        "- Usa segunda persona.\n"
+        "- Tono cercano, adulto e inteligente.\n"
+        "- NO hagas preguntas al usuario.\n"
+        "- NO pidas más contexto.\n"
+        "- Si el texto es insuficiente, genera un consejo y una verdad genéricos pero coherentes.\n\n"
+        "BLOQUE 1 · CONSEJO DE TU COACH:\n"
+        "- Un único párrafo corto (30-45 palabras).\n"
+        "- Enfoque práctico y realista.\n\n"
+        "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
+        "- Una sola frase.\n"
+        "- Directa, honesta e irónica. Muy compartible.\n"
+        "- Debe encajar con el mensaje del horóscopo.\n\n"
+        "FORMATO DE SALIDA (OBLIGATORIO):\n"
+        "Consejo de tu coach:\n"
+        "<texto>\n\n"
+        "Verdad incómoda del día:\n"
+        "<frase>\n\n"
+        f"TEXTO BASE:\n{text}\n"
     )
 
     resp = client.chat.completions.create(
@@ -161,7 +163,8 @@ def translate_es_strict(text: str) -> str:
                 "role": "system",
                 "content": (
                     "Eres un redactor editorial experto en horóscopos diarios. "
-                    "Transformas textos técnicos en lecturas atractivas y naturales."
+                    "Transformas textos en lecturas atractivas y naturales. "
+                    "Nunca pides más contexto."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -255,6 +258,7 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
 
 
 
