@@ -107,64 +107,72 @@ def join_sections(sections: dict) -> str:
 
 
 # ---------------------------
-# OpenAI – adaptación editorial (NO literal)
+# OpenAI – bloques Consejo + Verdad (basado SOLO en AstrologyAPI)
 # ---------------------------
 def translate_es_strict(text: str) -> str:
-    # 1) Si no hay texto, devolvemos fallback limpio (evita respuestas raras)
-    if not text or len(text.strip()) < 20:
-        return (
-            "Consejo de tu coach:\n"
-            "Hoy te conviene simplificar: elige una sola prioridad y hazla bien, sin dispersarte.\n\n"
-            "Verdad incómoda del día:\n"
-            "No es falta de tiempo: es falta de decisión."
-        )
+    if not text or not text.strip():
+        return ""
 
-    # 2) Si no hay OpenAI key, devolvemos el texto tal cual (como ya hacías)
+    # Si no hay API key, devolvemos el texto tal cual (debug / fallback)
     if not OPENAI_API_KEY:
         return text
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = (
-        "A partir del texto de horóscopo que te doy abajo, genera DOS BLOQUES NUEVOS.\n\n"
+        "A partir del TEXTO BASE que te doy abajo (salida directa de AstrologyAPI), "
+        "genera DOS BLOQUES NUEVOS.\n\n"
+
         "CONTEXTO:\n"
-        "El texto es un horóscopo diario por signo. No debes añadir información nueva, "
+        "El TEXTO BASE es un horóscopo diario por signo. No debes añadir información nueva, "
         "solo interpretar y extraer lo que ya está implícito en él.\n\n"
+
+        "REGLA CLAVE:\n"
+        "- Debes basarte ÚNICAMENTE en el TEXTO BASE (salida de AstrologyAPI).\n"
+        "- No puedes inventar hechos, situaciones ni predicciones.\n"
+        "- No hagas preguntas al usuario ni pidas más contexto.\n\n"
+
         "REGLAS GENERALES:\n"
         "- Escribe en español de España.\n"
-        "- No inventes hechos, situaciones ni predicciones nuevas.\n"
-        "- No menciones astrología técnica ni términos astrológicos.\n"
-        "- No menciones servicios premium ni llamadas a la acción.\n"
         "- Usa segunda persona.\n"
         "- Tono cercano, adulto e inteligente.\n"
-        "- NO hagas preguntas al usuario.\n"
-        "- NO pidas más contexto.\n"
-        "- Si el texto es insuficiente, genera un consejo y una verdad genéricos pero coherentes.\n\n"
+        "- No menciones astrología técnica ni términos astrológicos.\n"
+        "- No menciones servicios premium ni llamadas a la acción.\n"
+        "- No uses encabezados tipo 'General', 'Trabajo', 'Salud'.\n\n"
+
+        "PARA EVITAR QUE TODOS LOS SIGNOS SUENEN IGUAL:\n"
+        "- Incluye al menos 2 ideas concretas que estén en el TEXTO BASE (emociones, tensiones, decisiones, riesgos u oportunidades).\n"
+        "- Evita consejos genéricos tipo 'hidrátate, come bien, duerme' salvo que el TEXTO BASE vaya claramente de bienestar físico.\n\n"
+
         "BLOQUE 1 · CONSEJO DE TU COACH:\n"
         "- Un único párrafo corto (30-45 palabras).\n"
-        "- Enfoque práctico y realista.\n\n"
+        "- Enfoque práctico y realista.\n"
+        "- Aterriza el mensaje del horóscopo en comportamiento diario.\n"
+        "- Debe sonar a alguien que te conoce y te orienta, no a autoayuda vacía.\n\n"
+
         "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
         "- Una sola frase.\n"
         "- Directa, honesta e irónica. Muy compartible.\n"
-        "- Debe encajar con el mensaje del horóscopo.\n\n"
+        "- Debe encajar con el mensaje del horóscopo (interpretar sin inventar).\n\n"
+
         "FORMATO DE SALIDA (OBLIGATORIO):\n"
         "Consejo de tu coach:\n"
         "<texto>\n\n"
         "Verdad incómoda del día:\n"
         "<frase>\n\n"
-        f"TEXTO BASE:\n{text}\n"
+
+        f"TEXTO BASE (salida directa de AstrologyAPI):\n{text}\n"
     )
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        temperature=0.7,
+        temperature=0.55,
         messages=[
             {
                 "role": "system",
                 "content": (
                     "Eres un redactor editorial experto en horóscopos diarios. "
-                    "Transformas textos en lecturas atractivas y naturales. "
-                    "Nunca pides más contexto."
+                    "Tu contenido siempre se basa exclusivamente en el texto base proporcionado."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -225,7 +233,13 @@ def home():
 
 @app.get("/api/horoscope/today")
 def api_today():
-    force = request.args.get("force", "0").strip() == "1"
+    # ✅ Tu frontend manda ?t=... cuando pulsas "Actualizar".
+    #    Hacemos que eso cuente como force para regenerar.
+    force = (
+        request.args.get("force", "0").strip() == "1"
+        or ("t" in request.args)
+    )
+
     date_key, date_label = today_key_and_label()
 
     if (not force) and (date_key in CACHE):
@@ -258,8 +272,3 @@ def api_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
-
-
-
-
-
