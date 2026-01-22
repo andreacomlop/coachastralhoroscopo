@@ -117,23 +117,42 @@ def translate_es_strict(text: str) -> str:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    prompt = (
-        "Reescribe el siguiente texto en español de España.\n\n"
-        "Objetivo:\n"
-        "- Que suene cercano, elegante y fácil de leer.\n"
-        "- Que invite a seguir leyendo y deje sensación de que hay más profundidad.\n\n"
-        "Reglas importantes:\n"
-        "- NO inventes información nueva.\n"
-        "- NO menciones astrología técnica.\n"
-        "- NO uses encabezados como 'General', 'Trabajo', etc.\n"
-        "- NO traduzcas de forma literal.\n"
-        "- Integra todo en un solo texto fluido.\n"
-        "- Extensión media (aprox. 90–140 palabras).\n"
-        "- Tono reflexivo, inspirador y práctico.\n"
-        "- Habla en segunda persona.\n"
-        "- No menciones servicios premium ni llamadas a la acción.\n\n"
-        f"TEXTO BASE:\n{text}"
-    )
+  prompt = (
+    "A partir del texto de horóscopo que te doy abajo, genera DOS BLOQUES NUEVOS.\n\n"
+
+    "CONTEXTO:\n"
+    "El texto es un horóscopo diario por signo. No debes añadir información nueva, "
+    "solo interpretar y extraer lo que ya está implícito en él.\n\n"
+
+    "REGLAS GENERALES:\n"
+    "- Escribe en español de España.\n"
+    "- No inventes hechos, situaciones ni predicciones nuevas.\n"
+    "- No menciones astrología técnica ni términos astrológicos.\n"
+    "- No menciones servicios premium ni llamadas a la acción.\n"
+    "- Usa segunda persona.\n"
+    "- Tono cercano, adulto e inteligente.\n\n"
+
+    "BLOQUE 1 · CONSEJO DE TU COACH:\n"
+    "- Un único párrafo corto (30–45 palabras).\n"
+    "- Enfoque práctico y realista.\n"
+    "- Aterriza el mensaje del horóscopo en comportamiento diario.\n"
+    "- Debe sonar a alguien que te conoce y te orienta, no a autoayuda vacía.\n\n"
+
+    "BLOQUE 2 · VERDAD INCÓMODA DEL DÍA:\n"
+    "- Una sola frase.\n"
+    "- Directa, honesta y ligeramente irónica.\n"
+    "- Que haga pensar y sonreír a la vez.\n"
+    "- Muy compartible (efecto viral), pero sin ser agresiva ni juzgar.\n"
+    "- Debe encajar con el mensaje del horóscopo.\n\n"
+
+    "FORMATO DE SALIDA (OBLIGATORIO):\n"
+    "Consejo de tu coach:\n"
+    "<texto>\n\n"
+    "Verdad incómoda del día:\n"
+    "<frase>\n\n"
+
+    f"TEXTO BASE:\n{text}"
+)
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
@@ -409,3 +428,4 @@ def api_advice_truth():
             "error": "API_ERROR",
             "message": msg,
         }), 500
+
