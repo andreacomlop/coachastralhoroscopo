@@ -8,6 +8,7 @@ import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from openai import OpenAI
 
 # ---------------------------
 # Config (Render env vars)
@@ -19,11 +20,16 @@ ASTRO_API_KEY = os.getenv("ASTRO_API_KEY", "").strip()
 HORO_TZ = os.getenv("HORO_TZ", "").strip()  # opcional
 ASTRO_BASE = "https://json.astrologyapi.com/v1"
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+# Tus signos en español (los que expones en el JSON)
 SIGNS_ES = [
     "aries", "tauro", "géminis", "cáncer", "leo", "virgo",
     "libra", "escorpio", "sagitario", "capricornio", "acuario", "piscis",
 ]
 
+# Mapeo al nombre que pide AstrologyAPI
 SIGNS_EN = {
     "aries": "aries",
     "tauro": "taurus",
@@ -74,15 +80,8 @@ def get_tz_for_astrology() -> float:
 # ---------------------------
 def astrology_prediction_daily(sign_en: str, tz_hours: float) -> dict:
     """
-    Endpoint daily detailed (6 secciones):
-    {
-      "personal_life": "...",
-      "profession": "...",
-      "health": "...",
-      "emotions": "...",
-      "travel": "...",
-      "luck": "..."
-    }
+    Llama a:
+    POST https://json.astrologyapi.com/v1/sun_sign_prediction/daily/{zodiacName}
     """
     if not ASTRO_USER_ID or not ASTRO_API_KEY:
         raise RuntimeError("Faltan ASTRO_USER_ID o ASTRO_API_KEY en Render.")
@@ -97,16 +96,98 @@ def astrology_prediction_daily(sign_en: str, tz_hours: float) -> dict:
     return r.json()
 
 
-def extract_detailed_sections(api_json: dict) -> dict:
+def extract_sections_en(api_json: dict) -> dict:
     """
-    Nos quedamos SOLO con las secciones del daily detailed.
-    Si por lo que sea no vienen, devolvemos raw para depurar.
+    Normaliza el formato venga como:
+    A) {"personal_life": "...", "profession": "...", ...}
+    B) {"prediction": {"personal_life": "...", ...}, ...}
     """
     keys = ["personal_life", "profession", "health", "emotions", "travel", "luck"]
-    out = {k: api_json.get(k, "").strip() for k in keys if isinstance(api_json.get(k), str) and api_json.get(k).strip()}
-    if out:
-        return out
-    return {"raw": api_json}
+
+    # Caso A: claves directas
+    out_a = {
+        k: api_json.get(k, "").strip()
+        for k in keys
+        if isinstance(api_json.get(k), str) and api_json.get(k).strip()
+    }
+    if out_a:
+        return out_a
+
+    # Caso B: dentro de prediction
+    pred = api_json.get("prediction")
+    if isinstance(pred, dict):
+        out_b = {
+            k: pred.get(k, "").strip()
+            for k in keys
+            if isinstance(pred.get(k), str) and pred.get(k).strip()
+        }
+        if out_b:
+            return out_b
+
+    # fallback
+    return {"raw": json.dumps(api_json, ensure_ascii=False)}
+
+
+# ---------------------------
+# OpenAI – Traducción (cercana) SIN inventar
+# ---------------------------
+def translate_sections_to_es(sections_en: dict) -> dict:
+    """
+    Traduce el JSON de secciones a español de España, manteniendo las mismas claves.
+    Si no hay OPENAI_API_KEY, devuelve el inglés tal cual.
+    """
+    if not sections_en:
+        return {}
+
+    # Si vino fallback raw, no intentamos “reconstruir”, lo devolvemos tal cual.
+    if "raw" in sections_en:
+        return sections_en
+
+    if not OPENAI_API_KEY:
+        return sections_en
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = (
+        "Traduce al español de España el siguiente JSON de horóscopo.\n\n"
+        "ESTILO:\n"
+        "- Español natural, cercano y actual.\n"
+        "- Que suene a horóscopo bien escrito, no a traducción literal.\n"
+        "- Frases fluidas, humanas y fáciles de leer.\n"
+        "- Tono cercano pero adulto.\n\n"
+        "REGLAS:\n"
+        "- Mantén EXACTAMENTE las mismas claves del JSON.\n"
+        "- No añadas información nueva.\n"
+        "- No elimines contenido.\n"
+        "- No cambies el significado.\n"
+        "- Devuelve SOLO un JSON válido, sin texto extra.\n\n"
+        f"JSON (en inglés):\n{json.dumps(sections_en, ensure_ascii=False)}\n"
+    )
+
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        temperature=0.2,
+        messages=[
+            {
+                "role": "system",
+                "content": "Eres un traductor/redactor editorial preciso. Devuelves JSON válido y nada más."
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    content = (resp.choices[0].message.content or "").strip()
+
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            # devolvemos exactamente las mismas claves
+            return {k: str(parsed.get(k, "")).strip() for k in sections_en.keys()}
+    except Exception:
+        pass
+
+    # Fallback si el modelo no devolvió JSON perfecto
+    return sections_en
 
 
 # ---------------------------
@@ -114,13 +195,15 @@ def extract_detailed_sections(api_json: dict) -> dict:
 # ---------------------------
 def build_one_sign_detailed(sign_es: str, tz_hours: float, date_label: str) -> tuple[str, dict]:
     sign_en = SIGNS_EN[sign_es]
+
     api_json = astrology_prediction_daily(sign_en, tz_hours)
-    sections = extract_detailed_sections(api_json)
+    sections_en = extract_sections_en(api_json)
+    sections_es = translate_sections_to_es(sections_en)
 
     return sign_es, {
-        "prediction_date": date_label,
         "sun_sign": sign_es,
-        "sections": sections,  # <-- aquí van las 6 secciones
+        "prediction_date": date_label,
+        "sections": sections_es
     }
 
 
@@ -148,7 +231,7 @@ def build_detailed_today(date_key: str, date_label: str) -> dict:
 def home():
     return (
         "<h1>Coach Astral - API Horóscopo Detallado</h1>"
-        "<p>Endpoints:</p>"
+        "<p>Endpoint:</p>"
         "<ul>"
         "<li><code>/api/horoscope/detailed/today</code></li>"
         "</ul>",
@@ -159,7 +242,7 @@ def home():
 
 @app.get("/api/horoscope/detailed/today")
 def api_detailed_today():
-    # Si el frontend manda ?t=... cuando pulsas "Actualizar", forzamos refresco.
+    # Tu frontend manda ?t=... cuando pulsas "Actualizar".
     force = (request.args.get("force", "0").strip() == "1") or ("t" in request.args)
 
     date_key, date_label = today_key_and_label()
@@ -194,3 +277,4 @@ def api_detailed_today():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
