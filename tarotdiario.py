@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -33,8 +34,29 @@ def _today_str():
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
-def _cache_path(name: str):
-    return os.path.join(CACHE_DIR, f"{name}_{_today_str()}.json")
+def _safe_device_id() -> str:
+    """
+    device_id debe venir desde GoodBarber como query param: ?device_id=...
+    Si no viene, hacemos fallback (evita colisiones masivas, pero no es perfecto).
+    """
+    did = (request.args.get("device_id") or "").strip()
+    if did:
+        return did[:128]
+
+    # fallback: user-agent + ip (proxy friendly)
+    ua = (request.headers.get("User-Agent") or "").strip()
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+    raw = f"{ua}|{ip}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _cache_path(name: str, device_id: str):
+    """
+    Cache por día + device_id
+    """
+    day = _today_str()
+    safe = "".join(c for c in device_id if c.isalnum() or c in ("-", "_"))[:64] or "anon"
+    return os.path.join(CACHE_DIR, f"{name}_{day}_{safe}.json")
 
 
 def _read_cache(path: str):
@@ -146,12 +168,14 @@ FINANCE:
 def tarot_daily():
     """
     Tarot diario traducido.
-    Cache por día.
-    Puedes forzar live con ?live=1
+    Cache por día + device_id.
+    Puedes forzar live con ?live=1 (solo para ese device_id).
     """
     live = request.args.get("live", "0").strip() == "1"
+    device_id = _safe_device_id()
 
-    cache_file = _cache_path("tarot_daily")
+    cache_file = _cache_path("tarot_daily", device_id)
+
     if not live:
         cached = _read_cache(cache_file)
         if cached:
@@ -163,15 +187,24 @@ def tarot_daily():
     # 2) Traducir con OpenAI a tu estructura
     tarot_es = _translate_tarot_to_es(tarot_en)
 
-    # 3) Construir respuesta final (con nombres de tu app)
+    # 3) Construir respuesta final
     result = {
         "date": _today_str(),
         "amor": tarot_es["amor"],
         "trabajo": tarot_es["trabajo"],
         "dinero_y_fortuna": tarot_es["dinero_y_fortuna"],
-        # Por si quieres debug interno (opcional, puedes quitarlo)
+        # opcional debug (si quieres quitarlo, quítalo)
         "source_fields": ["love", "career", "finance"],
+        # útil para diagnosticar (puedes quitarlo cuando validemos)
+        "device_id_used": device_id,
     }
 
     _write_cache(cache_file, result)
     return jsonify(result)
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "date": _today_str()})
+
+
