@@ -1,0 +1,177 @@
+import os
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import requests
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from openai import OpenAI
+
+app = Flask(__name__)
+CORS(app)
+
+# ---------------------------
+# Config (Render env vars)
+# ---------------------------
+TZ_NAME = os.getenv("TZ", "Europe/Madrid").strip()
+
+ASTRO_USER_ID = os.getenv("ASTRO_USER_ID", "").strip()
+ASTRO_API_KEY = os.getenv("ASTRO_API_KEY", "").strip()
+ASTRO_BASE = "https://json.astrologyapi.com/v1"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+CACHE_DIR = os.getenv("CACHE_DIR", "/tmp")
+
+
+def _today_str():
+    tz = ZoneInfo(TZ_NAME)
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def _cache_path(name: str):
+    return os.path.join(CACHE_DIR, f"{name}_{_today_str()}.json")
+
+
+def _read_cache(path: str):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        return None
+    return None
+
+
+def _write_cache(path: str, data: dict):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _astro_post(endpoint: str, payload: dict | None = None):
+    url = f"{ASTRO_BASE}/{endpoint.lstrip('/')}"
+    r = requests.post(
+        url,
+        auth=(ASTRO_USER_ID, ASTRO_API_KEY),
+        headers={
+            "Content-Type": "application/json",
+            # Según la documentación, este endpoint solo soporta "en"
+            "Accept-Language": "en",
+        },
+        json=payload or {},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _translate_tarot_to_es(tarot_en: dict) -> dict:
+    """
+    Traducción a español natural, estilo Coach Astral.
+    Devuelve solo JSON con las claves: amor, trabajo, dinero_y_fortuna
+    """
+    love = (tarot_en.get("love") or "").strip()
+    career = (tarot_en.get("career") or "").strip()
+    finance = (tarot_en.get("finance") or "").strip()
+
+    prompt = f"""
+Vas a traducir y adaptar a español de España el texto de una lectura de tarot.
+Objetivo: que suene natural, correcto, claro y con tono de coaching (cercano, directo, sin exageraciones).
+Reglas:
+- No inventes información, solo traduce y adapta.
+- Evita anglicismos y frases forzadas.
+- Mantén el sentido original.
+- No uses "etc." ni puntos suspensivos.
+- Devuelve ÚNICAMENTE un JSON válido con estas claves exactas:
+  - "amor"
+  - "trabajo"
+  - "dinero_y_fortuna"
+
+Texto (EN):
+LOVE:
+{love}
+
+CAREER:
+{career}
+
+FINANCE:
+{finance}
+""".strip()
+
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": "Eres un redactor profesional en español (España)."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.4,
+    )
+
+    content = (resp.choices[0].message.content or "").strip()
+
+    # Intentar parsear JSON tal cual
+    try:
+        data = json.loads(content)
+    except Exception:
+        # Fallback: si viniera con texto extra, intenta aislar el JSON
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            data = json.loads(content[start : end + 1])
+        else:
+            # Último recurso: devolver algo mínimo (sin romper la app)
+            data = {
+                "amor": love,
+                "trabajo": career,
+                "dinero_y_fortuna": finance,
+            }
+
+    # Normaliza campos esperados
+    return {
+        "amor": (data.get("amor") or "").strip(),
+        "trabajo": (data.get("trabajo") or "").strip(),
+        "dinero_y_fortuna": (data.get("dinero_y_fortuna") or "").strip(),
+    }
+
+
+@app.get("/api/tarot")
+def tarot_daily():
+    """
+    Tarot diario traducido.
+    Cache por día.
+    Puedes forzar live con ?live=1
+    """
+    live = request.args.get("live", "0").strip() == "1"
+
+    cache_file = _cache_path("tarot_daily")
+    if not live:
+        cached = _read_cache(cache_file)
+        if cached:
+            return jsonify(cached)
+
+    # 1) Llamar a la API (inglés)
+    tarot_en = _astro_post("tarot_predictions", payload={})
+
+    # 2) Traducir con OpenAI a tu estructura
+    tarot_es = _translate_tarot_to_es(tarot_en)
+
+    # 3) Construir respuesta final (con nombres de tu app)
+    result = {
+        "date": _today_str(),
+        "amor": tarot_es["amor"],
+        "trabajo": tarot_es["trabajo"],
+        "dinero_y_fortuna": tarot_es["dinero_y_fortuna"],
+        # Por si quieres debug interno (opcional, puedes quitarlo)
+        "source_fields": ["love", "career", "finance"],
+    }
+
+    _write_cache(cache_file, result)
+    return jsonify(result)
