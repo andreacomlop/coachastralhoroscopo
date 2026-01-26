@@ -1,6 +1,8 @@
 import os
 import json
 import hashlib
+import random
+import secrets
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -95,6 +97,26 @@ def _astro_post(endpoint: str, payload: dict | None = None):
     return r.json()
 
 
+def _draw_tarot_numbers(device_id: str, live: bool) -> dict:
+    """
+    Devuelve 3 números (1..78) para love/career/finance.
+
+    - Si live=False: determinista por (día + device_id) para que sea estable todo el día.
+    - Si live=True: aleatorio real (nueva tirada) para ese device_id.
+    """
+    if live:
+        # Aleatorio real, sin reemplazo
+        nums = secrets.SystemRandom().sample(range(1, 79), 3)
+    else:
+        # Determinista: seed = sha256(day|device_id)
+        seed_raw = f"{_today_str()}|{device_id}".encode("utf-8")
+        seed_int = int(hashlib.sha256(seed_raw).hexdigest(), 16)
+        rng = random.Random(seed_int)
+        nums = rng.sample(range(1, 79), 3)
+
+    return {"love": nums[0], "career": nums[1], "finance": nums[2]}
+
+
 def _translate_tarot_to_es(tarot_en: dict) -> dict:
     """
     Traducción a español natural, estilo Coach Astral.
@@ -181,8 +203,11 @@ def tarot_daily():
         if cached:
             return jsonify(cached)
 
-    # 1) Llamar a la API (inglés)
-    tarot_en = _astro_post("tarot_predictions", payload={})
+    # 0) Generar números (1..78) requeridos por la API
+    nums = _draw_tarot_numbers(device_id=device_id, live=live)
+
+    # 1) Llamar a la API (inglés) con payload requerido
+    tarot_en = _astro_post("tarot_predictions", payload=nums)
 
     # 2) Traducir con OpenAI a tu estructura
     tarot_es = _translate_tarot_to_es(tarot_en)
@@ -193,10 +218,11 @@ def tarot_daily():
         "amor": tarot_es["amor"],
         "trabajo": tarot_es["trabajo"],
         "dinero_y_fortuna": tarot_es["dinero_y_fortuna"],
-        # opcional debug (si quieres quitarlo, quítalo)
+        # opcional debug
         "source_fields": ["love", "career", "finance"],
-        # útil para diagnosticar (puedes quitarlo cuando validemos)
         "device_id_used": device_id,
+        "numbers_used": nums,  # <- quítalo cuando ya esté validado
+        "live": live,
     }
 
     _write_cache(cache_file, result)
@@ -206,5 +232,3 @@ def tarot_daily():
 @app.get("/health")
 def health():
     return jsonify({"ok": True, "date": _today_str()})
-
-
