@@ -1,7 +1,8 @@
 # LaLunaDeHoy.py
-# Backend Flask para "La Luna de Hoy" (SIN cache)
+# Backend Flask para "La Luna de Hoy" (SIN cache en servidor)
 # - Obtiene moon_phase_report (EN) + lunar_metrics (EN) de AstrologyAPI
-# - Traduce el report al español con OpenAI (sin inventar ni añadir contenido)
+# - Traduce el report al español con OpenAI (fiel, sin inventar)
+# - Normaliza distancia: siempre devuelve distance_km + distance_source
 # - Devuelve JSON listo para GoodBarber: { date, luna_de_hoy, metrics }
 
 import os
@@ -13,7 +14,6 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from openai import OpenAI
 from openai import APIConnectionError, APITimeoutError, AuthenticationError
-
 
 # ---------------------------
 # Config
@@ -32,17 +32,16 @@ ASTRO_BASE = os.getenv("ASTRO_BASE", "https://json.astrologyapi.com/v1").strip()
 ASTRO_MOON_PHASE_URL = os.getenv("ASTRO_MOON_PHASE_URL", f"{ASTRO_BASE}/moon_phase_report").strip()
 ASTRO_LUNAR_METRICS_URL = os.getenv("ASTRO_LUNAR_METRICS_URL", f"{ASTRO_BASE}/lunar_metrics").strip()
 
-# Ubicación genérica (no es crítica para fase, pero mantenemos consistencia)
+# Ubicación genérica (Madrid por defecto) para efemérides colectivas
 DEFAULT_LAT = float(os.getenv("ASTRO_LAT", "40.4168"))
 DEFAULT_LON = float(os.getenv("ASTRO_LON", "-3.7038"))
 HOUSE_TYPE = os.getenv("ASTRO_HOUSE_TYPE", "placidus").strip()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ✅ Render necesita una variable llamada "app"
+# ✅ Importante: Render/Gunicorn esperan que exista una variable llamada "app"
 app = Flask(__name__)
 CORS(app)
-
 
 # ---------------------------
 # Helpers
@@ -90,6 +89,52 @@ def _astro_post(url: str, payload: dict, accept_language: str | None = None, tim
     return r.json()
 
 
+def _to_num(v):
+    """Convierte a float si es posible, si no devuelve None."""
+    try:
+        if v in (None, "", "--"):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def normalize_lunar_metrics(metrics: dict) -> dict:
+    """
+    AstrologyAPI a veces devuelve distance="--".
+    En ese caso, usamos apogee_distance o perigee_distance y devolvemos:
+      - distance_km (numérico)
+      - distance_source ("distance" | "apogee_distance" | "perigee_distance")
+    """
+    if not isinstance(metrics, dict):
+        return {}
+
+    m = dict(metrics)  # copia
+
+    dist = _to_num(m.get("distance"))
+    dist_src = "distance"
+
+    # Si "distance" no viene, decide fuente mejor:
+    if dist is None:
+        # prioridad según situación
+        if m.get("within_apogee_range") and _to_num(m.get("apogee_distance")) is not None:
+            dist = _to_num(m.get("apogee_distance"))
+            dist_src = "apogee_distance"
+        elif m.get("within_perigee_range") and _to_num(m.get("perigee_distance")) is not None:
+            dist = _to_num(m.get("perigee_distance"))
+            dist_src = "perigee_distance"
+        else:
+            # fallback: alguno si existe
+            dist = _to_num(m.get("apogee_distance")) or _to_num(m.get("perigee_distance"))
+            dist_src = "apogee_distance/perigee_distance"
+
+    if dist is not None:
+        m["distance_km"] = dist
+        m["distance_source"] = dist_src
+
+    return m
+
+
 def get_moon_today_facts(now: datetime, lat: float, lon: float) -> dict:
     """
     2 llamadas a AstrologyAPI (a las 12:00):
@@ -101,6 +146,8 @@ def get_moon_today_facts(now: datetime, lat: float, lon: float) -> dict:
 
     moon_report = _astro_post(ASTRO_MOON_PHASE_URL, payload, accept_language="en", timeout=20)
     lunar_metrics = _astro_post(ASTRO_LUNAR_METRICS_URL, payload, accept_language="en", timeout=20)
+
+    lunar_metrics = normalize_lunar_metrics(lunar_metrics)
 
     return {
         "moon_phase_report": {
@@ -134,16 +181,20 @@ def build_translation_prompt(facts: dict) -> str:
         "- No menciones que es una traducción.",
         "",
         "FORMATO DE SALIDA:",
-        "- Título breve en español.",
-        "- Texto traducido (sin añadir nada).",
+        "- Incluye estas 3 etiquetas tal cual, cada una en su propia línea:",
+        "  FASE LUNAR:",
+        "  SIGNIFICADO:",
+        "  INFORME:",
+        "- Debajo de cada etiqueta, el texto traducido correspondiente.",
+        "- NO añadas listas ni títulos extra.",
         "",
         "CONTENIDO A TRADUCIR:",
-        f"Moon phase: {phase}",
+        f"FASE LUNAR: {phase}",
         "",
-        "Significance:",
+        "SIGNIFICADO:",
         sig,
         "",
-        "Report:",
+        "INFORME:",
         rep,
     ])
 
@@ -222,3 +273,4 @@ def moon_today():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
+
